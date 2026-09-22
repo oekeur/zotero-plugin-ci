@@ -1,0 +1,53 @@
+name: Zotero release watch (reusable)
+
+on:
+  workflow_call:
+    inputs:
+      min-version:
+        description: Ignore Zotero versions at or below this one.
+        type: string
+        default: "10.0.3"
+      manifest-path:
+        description: Manifest to read applications.zotero.strict_max_version from.
+        type: string
+        default: addon/manifest.json
+      dry-run:
+        description: Write what would be filed to the job summary and file nothing.
+        type: boolean
+        default: false
+
+jobs:
+  watch:
+    runs-on: ubuntu-latest
+    steps:
+      # In a reusable workflow the github context is the caller's, so this checks
+      # out the plugin repo and gh issue commands land there.
+      - name: Check out the calling repo
+        uses: actions/checkout@v4
+
+      - name: Check out the watcher
+        uses: actions/checkout@v4
+        with:
+          repository: oekeur/zotero-plugin-ci
+          ref: main
+          path: .zotero-plugin-ci
+
+      - name: Bootstrap labels
+        if: ${{ !inputs.dry-run }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh label create zotero-release --force --color 1D76DB \
+            --description "A new Zotero version is available"
+          gh label create zotero-beta --force --color FBCA04 \
+            --description "Zotero beta build, not a stable release"
+          gh label create zotero-breaking --force --color B60205 \
+            --description "Above strict_max_version; the plugin will not load"
+
+      - name: Watch
+        env:
+          GH_TOKEN: ${{ github.token }}
+          MIN_VERSION: ${{ inputs.min-version }}
+          MANIFEST_PATH: ${{ inputs.manifest-path }}
+          DRY_RUN: ${{ inputs.dry-run }}
+        run: bash .zotero-plugin-ci/scripts/zotero-release-watch.sh
