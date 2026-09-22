@@ -34,6 +34,39 @@ dev_page() {
   printf '%s' "$url"
 }
 
+# The Linux tarball for a version, or non-zero when none is published. Two quirks
+# make this a probe rather than a format string: a ".0" patch release drops the
+# trailing ".0" from the path (tag 10.0.0 lives at /release/10.0/Zotero-10.0_...)
+# and Zotero 7 ships .tar.bz2 where 8 and up ship .tar.xz. Probing the candidates
+# also means a future change in either quirk degrades to "no build found" rather
+# than to a broken download.
+build_url() {
+  local version="$1" channel="$2" name ext url
+  if [ "$channel" = "beta" ]; then
+    printf '%s' "$BETA_EFFECTIVE"
+    return 0
+  fi
+  for name in "$version" "${version%.0}"; do
+    for ext in xz bz2; do
+      url="https://download.zotero.org/client/release/${name}/Zotero-${name}_linux-x86_64.tar.${ext}"
+      if curl -fsI -m 20 -o /dev/null "$url"; then printf '%s' "$url"; return 0; fi
+    done
+  done
+  return 1
+}
+
+# Matrix rows for the smoke-test job, one JSON object per version actually filed.
+matrix_rows=()
+add_matrix_row() {
+  local version="$1" channel="$2" issue="$3" url
+  if ! url="$(build_url "$version" "$channel")"; then
+    echo "no Linux build published for $version, skipping the smoke test" >&2
+    return 0
+  fi
+  matrix_rows+=("$(jq -nc --arg v "$version" --arg c "$channel" --arg i "$issue" --arg u "$url" \
+    '{version:$v, channel:$c, issue:$i, url:$u}')")
+}
+
 # --- candidates -------------------------------------------------------------
 
 stable_tags="$(git ls-remote --tags --refs "$ZOTERO_REPO" \
@@ -55,7 +88,8 @@ done <<< "$stable_tags"
 # source. It reports the current beta only, which is fine here: a beta issue is
 # filed solely when the beta breaks the ceiling, and that state persists across
 # builds until the ceiling is raised.
-beta_effective="$(curl -fsSIL -m 20 -o /dev/null -w '%{url_effective}' "$BETA_URL" || true)"
+BETA_EFFECTIVE="$(curl -fsSIL -m 20 -o /dev/null -w '%{url_effective}' "$BETA_URL" || true)"
+beta_effective="$BETA_EFFECTIVE"
 if [ -n "$beta_effective" ]; then
   beta_raw="${beta_effective##*/client/beta/}"; beta_raw="${beta_raw%%/*}"
   beta_version="${beta_raw//%2B/+}"; beta_version="${beta_version//%2b/+}"
@@ -118,15 +152,19 @@ for i in "${!versions[@]}"; do
   fi
   printf -- '- [Zotero changelog](https://www.zotero.org/support/changelog)\n' >> "$body"
 
+  issue=""
   if [ "$DRY_RUN" = "true" ]; then
     { printf '### Would file: %s\n\n' "$title"
       printf 'Labels: `%s`\n\n' "$labels"
       cat "$body"
       printf '\n---\n\n'; } >> "$SUMMARY"
   else
-    gh issue create --title "$title" --body-file "$body" --label "$labels"
+    issue_url="$(gh issue create --title "$title" --body-file "$body" --label "$labels")"
+    echo "$issue_url"
+    issue="${issue_url##*/}"
   fi
   rm -f "$body"
+  add_matrix_row "$version" "$channel" "$issue"
   existing="$existing
 $title"
   filed=$((filed + 1))
@@ -135,4 +173,12 @@ done
 if [ "$filed" -eq 0 ]; then
   printf 'No new Zotero versions. Ceiling `%s`, baseline `%s`.\n' "$CEILING" "$MIN_VERSION" >> "$SUMMARY"
 fi
+
+# The smoke-test job fans out over this. Empty array when there is nothing new,
+# which is what its `if:` guard tests.
+matrix="$(printf '%s\n' "${matrix_rows[@]+"${matrix_rows[@]}"}" | jq -sc '.')"
+if [ -n "${GITHUB_OUTPUT:-}" ]; then
+  printf 'matrix=%s\n' "$matrix" >> "$GITHUB_OUTPUT"
+fi
 echo "candidates: $filed"
+echo "smoke matrix: $matrix"

@@ -15,10 +15,16 @@ on:
         description: Write what would be filed to the job summary and file nothing.
         type: boolean
         default: false
+      smoke-test:
+        description: Build the plugin against each new Zotero and report the result.
+        type: boolean
+        default: true
 
 jobs:
   watch:
     runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.watch.outputs.matrix }}
     steps:
       # In a reusable workflow the github context is the caller's, so this checks
       # out the plugin repo and gh issue commands land there.
@@ -43,11 +49,104 @@ jobs:
             --description "Zotero beta build, not a stable release"
           gh label create zotero-breaking --force --color B60205 \
             --description "Above strict_max_version; the plugin will not load"
+          gh label create zotero-smoke-failed --force --color D93F0B \
+            --description "The test suite failed against this Zotero version"
 
       - name: Watch
+        id: watch
         env:
           GH_TOKEN: ${{ github.token }}
           MIN_VERSION: ${{ inputs.min-version }}
           MANIFEST_PATH: ${{ inputs.manifest-path }}
           DRY_RUN: ${{ inputs.dry-run }}
         run: bash .zotero-plugin-ci/scripts/zotero-release-watch.sh
+
+  # Builds the plugin and runs its suite against each new Zotero, then reports
+  # on the issue the watch job just filed. This is the check the version ceiling
+  # cannot make: a patch release can break the plugin without crossing it.
+  #
+  # An issue opened with GITHUB_TOKEN does not trigger further workflow runs, so
+  # this cannot be an `on: issues` workflow in the plugin repo. It runs here, in
+  # the same run that filed the issue.
+  smoke:
+    needs: watch
+    if: ${{ inputs.smoke-test && needs.watch.outputs.matrix != '[]' }}
+    name: smoke (Zotero ${{ matrix.target.version }})
+    runs-on: ubuntu-latest
+    # The pinned matrix in the plugin repos' own ci.yml takes ~2.5 min per job.
+    # This is a backstop against the scaffold hanging with no output.
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      max-parallel: 4
+      matrix:
+        target: ${{ fromJSON(needs.watch.outputs.matrix) }}
+    steps:
+      - name: Setup JS
+        uses: zotero-plugin-dev/workflows/setup-js@main
+
+      # Installed here rather than left to the scaffold, which shells out to apt
+      # with stdio "pipe" and no lock timeout: a held dpkg lock then blocks
+      # forever and prints nothing. Same packages and same timeout as the plugin
+      # repos' ci.yml, for the same reason.
+      - name: Install Zotero runtime dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get -o DPkg::Lock::Timeout=180 update
+          sudo apt-get -o DPkg::Lock::Timeout=180 install -y \
+            xvfb x11-xkb-utils xkb-data libasound2t64 libdbus-glib-1-2
+
+      # Zotero 7 ships .tar.bz2 and 8 and up ship .tar.xz; tar -xf detects both.
+      # installZoteroLinux returns early when ZOTERO_PLUGIN_ZOTERO_BIN_PATH is
+      # set, which is the seam that pins the suite to this exact build.
+      - name: Download and extract Zotero ${{ matrix.target.version }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          dir="${{ runner.temp }}/zotero"
+          mkdir -p "$dir"
+          curl -fL --retry 3 --output "$dir/zotero.tar" "${{ matrix.target.url }}"
+          tar -xf "$dir/zotero.tar" -C "$dir"
+          rm "$dir/zotero.tar"
+          bin="$dir/Zotero_linux-x86_64/zotero"
+          test -x "$bin"
+          echo "ZOTERO_PLUGIN_ZOTERO_BIN_PATH=$bin" >> "$GITHUB_ENV"
+
+      - name: Run the plugin test suite
+        id: suite
+        continue-on-error: true
+        run: npm run test
+
+      - name: Report the result
+        if: always()
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          OUTCOME: ${{ steps.suite.outcome }}
+          VERSION: ${{ matrix.target.version }}
+          CHANNEL: ${{ matrix.target.channel }}
+          BUILD_URL: ${{ matrix.target.url }}
+          ISSUE: ${{ matrix.target.issue }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          body="$(mktemp)"
+          if [ "$OUTCOME" = "success" ]; then
+            printf '**Smoke test passed** against Zotero %s (%s).\n\n' "$VERSION" "$CHANNEL" >> "$body"
+            printf 'The plugin builds and its suite runs green on this build, including the startup check that polls `data.initialized`.\n\n' >> "$body"
+          else
+            printf '**Smoke test failed** against Zotero %s (%s).\n\n' "$VERSION" "$CHANNEL" >> "$body"
+            printf 'The plugin build or its suite failed on this build. This is independent of the version ceiling: a release can break the plugin without crossing `strict_max_version`.\n\n' >> "$body"
+          fi
+          printf -- '- Build: %s\n' "$BUILD_URL" >> "$body"
+          printf -- '- [Workflow run](%s)\n' "$RUN_URL" >> "$body"
+
+          if [ -n "$ISSUE" ]; then
+            gh issue comment "$ISSUE" --body-file "$body"
+            if [ "$OUTCOME" != "success" ]; then
+              gh issue edit "$ISSUE" --add-label zotero-smoke-failed
+            fi
+          else
+            { printf '### Smoke test: Zotero %s\n\n' "$VERSION"; cat "$body"; printf '\n'; } >> "$GITHUB_STEP_SUMMARY"
+          fi

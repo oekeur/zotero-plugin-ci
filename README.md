@@ -52,12 +52,37 @@ pinning the caller to a tag would mix a pinned workflow with a moving script.
 | `min-version` | `10.0.3` | Ignore Zotero versions at or below this. Stops the first run from filing an issue for all 49 tags since Zotero 7. Static: dedupe covers repetition, so it never needs bumping. |
 | `manifest-path` | `addon/manifest.json` | Where `applications.zotero.strict_max_version` lives. |
 | `dry-run` | `false` | Write what would be filed to the job summary and file nothing. |
+| `smoke-test` | `true` | Build the plugin against each new Zotero and report the result on the issue. |
 
 ### Labels
 
 Created on first live run with `gh label create --force`, so no manual setup:
 `zotero-release` on every issue, `zotero-beta` on beta builds,
-`zotero-breaking` when the version is above the ceiling.
+`zotero-breaking` when the version is above the ceiling, `zotero-smoke-failed`
+when the suite fails against it.
+
+### Smoke test
+
+The `smoke` job downloads each new Zotero, pins the plugin's test suite to it
+through `ZOTERO_PLUGIN_ZOTERO_BIN_PATH`, runs `npm run test`, and comments the
+result on the issue the `watch` job just filed. That covers what the version
+ceiling cannot: a patch release can break the plugin without crossing
+`strict_max_version`.
+
+It runs in the same workflow run that files the issue, and not as an
+`on: issues` workflow in the plugin repo, because an issue opened with
+`GITHUB_TOKEN` does not trigger further workflow runs.
+
+The apt packages and the download/extract step mirror the pinned matrix in each
+plugin's own `ci.yml`, including the explicit `DPkg::Lock::Timeout`: the
+scaffold's own apt call has no timeout and hangs silently on a held dpkg lock.
+
+Resolving a version's tarball is a probe rather than a format string, because of
+two quirks. A `.0` patch release drops the trailing `.0` from the path, so tag
+`10.0.0` lives at `/client/release/10.0/Zotero-10.0_linux-x86_64.tar.xz`. And
+Zotero 7 ships `.tar.bz2` where 8 and up ship `.tar.xz`. Some tags have no
+published build at all: `9.0.5` is tagged and returns 403 on every platform. The
+issue is still filed for those; only the smoke test is skipped.
 
 ### Where the versions come from
 
