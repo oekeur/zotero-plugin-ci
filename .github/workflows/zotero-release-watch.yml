@@ -142,7 +142,7 @@ jobs:
           printf -- '- Build: %s\n' "$BUILD_URL" >> "$body"
           printf -- '- [Workflow run](%s)\n' "$RUN_URL" >> "$body"
 
-          # ISSUE is the tracker for this Zotero major. Its labels describe the
+          # ISSUE is the tracker for this Zotero minor series. Its labels describe the
           # latest build, and the watch job cleared zotero-smoke-failed when it
           # recorded this one, so only a failure needs a label change here.
           if [ -n "$ISSUE" ]; then

@@ -5,7 +5,8 @@ Shared GitHub Actions for the Zotero plugins in this account.
 ## Zotero release watch
 
 `.github/workflows/zotero-release-watch.yml` records each new Zotero version on
-one tracker issue per Zotero major version in the repo that calls it, and flags
+one tracker issue per Zotero minor version series (`10.0`, `11.0`) in the repo
+that calls it, and flags
 the versions that exceed the plugin's `strict_max_version`. That ceiling fails silently in Zotero: the plugin
 does not appear under Tools -> Plugins, with no console error and no install
 failure, so nothing else tells you a new Zotero broke it.
@@ -56,12 +57,14 @@ pinning the caller to a tag would mix a pinned workflow with a moving script.
 
 ### Tracker issues
 
-Each Zotero major version gets one issue, `Zotero 11 releases (latest: ...)`,
-covering its stable and beta builds alike. A new build adds a comment describing
+Each Zotero minor version series gets one issue, such as
+`Zotero 11.0 releases (latest: ...)`, covering its stable and beta builds alike:
+`11.0-beta.5` and a later `11.0.0` share a tracker, `11.1-beta.1` opens a new
+one. A new build adds a comment describing
 it, an entry in the issue body's build list, and a new title naming it. Closing
 the tracker means "checked against the latest build"; the next build reopens it.
 
-The tracker is found by a hidden `<!-- zotero-release-tracker major=N -->`
+The tracker is found by a hidden `<!-- zotero-release-tracker series=X.Y -->`
 marker in its body, since the title changes with every build. Each recorded
 build carries a `<!-- zotero-release-version: X -->` marker in both its comment
 and its body entry; those markers are the dedupe record. The body list is the
