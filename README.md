@@ -6,8 +6,8 @@ Shared GitHub Actions for the Zotero plugins in this account.
 
 `.github/workflows/zotero-release-watch.yml` records each new Zotero version on
 one tracker issue per Zotero minor version series (`10.0`, `11.0`) in the repo
-that calls it, and flags
-the versions that exceed the plugin's `strict_max_version`. That ceiling fails silently in Zotero: the plugin
+that calls it, and flags the versions that exceed the plugin's
+`strict_max_version`. That ceiling fails silently in Zotero: the plugin
 does not appear under Tools -> Plugins, with no console error and no install
 failure, so nothing else tells you a new Zotero broke it.
 
