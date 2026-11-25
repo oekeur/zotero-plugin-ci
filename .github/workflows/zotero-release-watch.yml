@@ -62,7 +62,7 @@ jobs:
         run: bash .zotero-plugin-ci/scripts/zotero-release-watch.sh
 
   # Builds the plugin and runs its suite against each new Zotero, then reports
-  # on the issue the watch job just filed. This is the check the version ceiling
+  # on the tracker issue the watch job just recorded the build on. This is the check the version ceiling
   # cannot make: a patch release can break the plugin without crossing it.
   #
   # An issue opened with GITHUB_TOKEN does not trigger further workflow runs, so
@@ -142,6 +142,9 @@ jobs:
           printf -- '- Build: %s\n' "$BUILD_URL" >> "$body"
           printf -- '- [Workflow run](%s)\n' "$RUN_URL" >> "$body"
 
+          # ISSUE is the tracker for this Zotero major. Its labels describe the
+          # latest build, and the watch job cleared zotero-smoke-failed when it
+          # recorded this one, so only a failure needs a label change here.
           if [ -n "$ISSUE" ]; then
             gh issue comment "$ISSUE" --body-file "$body"
             if [ "$OUTCOME" != "success" ]; then

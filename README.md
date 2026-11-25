@@ -4,9 +4,9 @@ Shared GitHub Actions for the Zotero plugins in this account.
 
 ## Zotero release watch
 
-`.github/workflows/zotero-release-watch.yml` opens one issue per new Zotero
-version in the repo that calls it, and flags the versions that exceed the
-plugin's `strict_max_version`. That ceiling fails silently in Zotero: the plugin
+`.github/workflows/zotero-release-watch.yml` records each new Zotero version on
+one tracker issue per Zotero major version in the repo that calls it, and flags
+the versions that exceed the plugin's `strict_max_version`. That ceiling fails silently in Zotero: the plugin
 does not appear under Tools -> Plugins, with no console error and no install
 failure, so nothing else tells you a new Zotero broke it.
 
@@ -49,23 +49,39 @@ pinning the caller to a tag would mix a pinned workflow with a moving script.
 
 | input | default | purpose |
 |---|---|---|
-| `min-version` | `10.0.3` | Ignore Zotero versions at or below this. Stops the first run from filing an issue for all 49 tags since Zotero 7. Static: dedupe covers repetition, so it never needs bumping. |
+| `min-version` | `10.0.3` | Ignore Zotero versions at or below this. Stops the first run from recording all 49 tags since Zotero 7. Static: dedupe covers repetition, so it never needs bumping. |
 | `manifest-path` | `addon/manifest.json` | Where `applications.zotero.strict_max_version` lives. |
 | `dry-run` | `false` | Write what would be filed to the job summary and file nothing. |
 | `smoke-test` | `true` | Build the plugin against each new Zotero and report the result on the issue. |
 
+### Tracker issues
+
+Each Zotero major version gets one issue, `Zotero 11 releases (latest: ...)`,
+covering its stable and beta builds alike. A new build adds a comment describing
+it, an entry in the issue body's build list, and a new title naming it. Closing
+the tracker means "checked against the latest build"; the next build reopens it.
+
+The tracker is found by a hidden `<!-- zotero-release-tracker major=N -->`
+marker in its body, since the title changes with every build. Each recorded
+build carries a `<!-- zotero-release-version: X -->` marker in both its comment
+and its body entry; those markers are the dedupe record. The body list is the
+one that counts, because `gh issue list` returns a limited number of comments
+per issue. Issues titled `Zotero X released`, from before trackers existed, also
+count as recorded, so switching over re-files nothing.
+
 ### Labels
 
-Created on first live run with `gh label create --force`, so no manual setup:
-`zotero-release` on every issue, `zotero-beta` on beta builds,
-`zotero-breaking` when the version is above the ceiling, `zotero-smoke-failed`
+Created on first live run with `gh label create --force`, so no manual setup.
+`zotero-release` marks every tracker. The other three describe the latest build
+only, and are set or cleared each time one is recorded: `zotero-beta` for a beta
+build, `zotero-breaking` when it is above the ceiling, `zotero-smoke-failed`
 when the suite fails against it.
 
 ### Smoke test
 
 The `smoke` job downloads each new Zotero, pins the plugin's test suite to it
 through `ZOTERO_PLUGIN_ZOTERO_BIN_PATH`, runs `npm run test`, and comments the
-result on the issue the `watch` job just filed. That covers what the version
+result on the tracker the `watch` job just recorded the build on. That covers what the version
 ceiling cannot: a patch release can break the plugin without crossing
 `strict_max_version`.
 
@@ -82,7 +98,7 @@ two quirks. A `.0` patch release drops the trailing `.0` from the path, so tag
 `10.0.0` lives at `/client/release/10.0/Zotero-10.0_linux-x86_64.tar.xz`. And
 Zotero 7 ships `.tar.bz2` where 8 and up ship `.tar.xz`. Some tags have no
 published build at all: `9.0.5` is tagged and returns 403 on every platform. The
-issue is still filed for those; only the smoke test is skipped.
+build is still recorded on its tracker; only the smoke test is skipped.
 
 ### Where the versions come from
 
@@ -94,7 +110,7 @@ Betas therefore cannot come from tags. The job follows
 `https://www.zotero.org/download/client/dl?channel=beta&platform=linux-x86_64`
 with `curl -sIL`, which resolves to a path naming the current beta, for example
 `10.0.3-beta.2+80bc5565e`. That reports the current beta only, never a history.
-An issue is filed for a beta solely when it is above the ceiling, which is the
+A beta is recorded solely when it is above the ceiling, which is the
 advance warning worth having and holds until the ceiling is raised. Routine
 `10.0.4-beta.N` builds are ignored.
 
@@ -114,7 +130,8 @@ and takes no arguments, so it runs outside Actions with `gh` stubbed on `PATH`
 and `DRY_RUN=true`. Cover at least: a baseline equal to the current release
 (expect nothing), a baseline below it (expect the intervening versions, none
 breaking), a lowered ceiling (expect the same versions all breaking, plus the
-beta), a pinned ceiling, and a pre-seeded issue title for dedupe.
+beta), a pinned ceiling, a legacy `Zotero X released` title, a tracker whose build list
+already holds a version, and a closed tracker (expect a reopen).
 
 ### Adding a third plugin
 

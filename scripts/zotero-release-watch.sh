@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# Finds Zotero versions this repo has not filed an issue for yet and files one
-# per version, flagging those the manifest's strict_max_version will not load.
+# Finds Zotero versions this repo has not recorded yet and records each on one
+# tracker issue per Zotero major version, flagging those the manifest's
+# strict_max_version will not load.
 #
 # Environment:
 #   MIN_VERSION    ignore stable tags at or below this
@@ -103,11 +104,55 @@ else
   echo "warning: could not resolve the beta channel redirect" >&2
 fi
 
-# --- dedupe -----------------------------------------------------------------
+# --- trackers ---------------------------------------------------------------
+# One issue per Zotero major version collects every build of that major, stable
+# and beta alike. The tracker is found by a marker in its body, not its title,
+# because the title names the latest build and changes with each one. Each build
+# is a comment carrying a version marker; those markers are the dedupe record.
+#
 # gh issue list is the REST list endpoint, so unlike search it has no index lag.
-# --state all is load-bearing: a closed issue must not be re-filed.
+# --state all is load-bearing: a closed tracker still records what it has seen.
 
-existing="$(gh issue list --state all --limit 500 --json title -q '.[].title')"
+TRACKER_MARK="zotero-release-tracker major="
+VERSION_MARK="zotero-release-version: "
+
+issues_json="$(gh issue list --state all --label zotero-release --limit 500 \
+  --json number,state,title,body,comments,labels)"
+
+# Versions already recorded: markers in tracker comments, plus the titles of the
+# one-issue-per-version issues filed before trackers existed, so the switch does
+# not re-file those.
+seen="$(jq -r --arg vm "$VERSION_MARK" '
+  .[] | (.comments[].body, .body) | (. // "")
+      | scan("<!-- " + $vm + "([^ ]+) -->") | .[0]' <<< "$issues_json")
+$(jq -r '.[].title | capture("^Zotero (?<v>[^ ]+) released$") | .v' <<< "$issues_json")"
+
+# Tracker number, state and labels per major, kept current as this run files.
+declare -A tracker tracker_state tracker_labels tracker_body
+while IFS=$'\t' read -r major number state labels; do
+  [ -n "$major" ] || continue
+  tracker[$major]="$number"; tracker_state[$major]="$state"; tracker_labels[$major]="$labels"
+  tracker_body[$major]="$(jq -r --argjson n "$number" '.[] | select(.number == $n) | .body' <<< "$issues_json")"
+done < <(jq -r --arg tm "$TRACKER_MARK" '
+  sort_by(.number) | .[]
+  | ([(.body // "") | capture("<!-- " + $tm + "(?<m>[0-9]+) -->")?] | .[0].m) as $m
+  | select($m != null)
+  | [$m, .number, .state, ([.labels[].name] | join(","))] | @tsv' <<< "$issues_json")
+
+has_label() { [[ ",$1," == *",$2,"* ]]; }
+
+# Sets or clears one label on a tracker so it describes the latest build only.
+set_label() {
+  local major="$1" label="$2" want="$3" number="${tracker[$1]}"
+  local current="${tracker_labels[$major]:-}"
+  if [ "$want" = "true" ] && ! has_label "$current" "$label"; then
+    gh issue edit "$number" --add-label "$label" > /dev/null
+    tracker_labels[$major]="$current,$label"
+  elif [ "$want" != "true" ] && has_label "$current" "$label"; then
+    gh issue edit "$number" --remove-label "$label" > /dev/null
+    tracker_labels[$major]="$(tr ',' '\n' <<< "$current" | grep -Fxv "$label" | paste -sd, -)"
+  fi
+}
 
 # --- file -------------------------------------------------------------------
 
@@ -116,57 +161,92 @@ for i in "${!versions[@]}"; do
   version="${versions[$i]}"
   channel="${channels[$i]}"
   prev_tag="${previous[$i]}"
-  title="Zotero ${version} released"
 
-  if printf '%s\n' "$existing" | grep -Fxq "$title"; then continue; fi
+  if printf '%s\n' "$seen" | grep -Fxq "$version"; then continue; fi
 
   base="${version%%-*}"
   major="${base%%.*}"
-  labels="zotero-release"
-  [ "$channel" = "beta" ] && labels="$labels,zotero-beta"
+  breaking=false; breaks_ceiling "$base" && breaking=true
+  beta=false; [ "$channel" = "beta" ] && beta=true
+  title="Zotero ${major} releases (latest: ${version})"
 
-  body="$(mktemp)"
-  if ! breaks_ceiling "$base"; then
-    printf 'Zotero %s is out on the %s channel, within this plugin'\''s ceiling.\n\n' \
-      "$version" "$channel" >> "$body"
+  note="$(mktemp)"
+  printf '<!-- %s%s -->\n' "$VERSION_MARK" "$version" >> "$note"
+  if [ "$breaking" = "false" ]; then
+    printf '**Zotero %s** is out on the %s channel, within this plugin'\''s ceiling.\n\n' \
+      "$version" "$channel" >> "$note"
   else
-    labels="$labels,zotero-breaking"
-    printf 'Zotero %s is out on the %s channel and **this plugin will not load on it**.\n\n' \
-      "$version" "$channel" >> "$body"
+    printf '**Zotero %s** is out on the %s channel and **this plugin will not load on it**.\n\n' \
+      "$version" "$channel" >> "$note"
     printf 'Zotero refuses it silently: no console error, no install failure, the plugin just does not appear. Raise `applications.zotero.strict_max_version` in `%s` once the version has been checked against it.\n\n' \
-      "$MANIFEST_PATH" >> "$body"
+      "$MANIFEST_PATH" >> "$note"
   fi
-  printf -- '- Current ceiling: `%s` (`%s`)\n' "$CEILING" "$MANIFEST_PATH" >> "$body"
-  printf -- '- Channel: %s\n\n' "$channel" >> "$body"
-
-  printf '## Links\n\n' >> "$body"
+  printf -- '- Current ceiling: `%s` (`%s`)\n' "$CEILING" "$MANIFEST_PATH" >> "$note"
   if [ "$channel" = "release" ]; then
-    printf -- '- [Source tree at %s](https://github.com/zotero/zotero/tree/%s)\n' "$version" "$version" >> "$body"
+    printf -- '- [Source tree at %s](https://github.com/zotero/zotero/tree/%s)\n' "$version" "$version" >> "$note"
     if [ -n "$prev_tag" ]; then
       printf -- '- [Changes since %s](https://github.com/zotero/zotero/compare/%s%s%s)\n' \
-        "$prev_tag" "$prev_tag" "$COMPARE_SEP" "$version" >> "$body"
+        "$prev_tag" "$prev_tag" "$COMPARE_SEP" "$version" >> "$note"
     fi
   fi
-  if dev_url="$(dev_page "$major")"; then
-    printf -- '- [Zotero %s for Developers](%s)\n' "$major" "$dev_url" >> "$body"
-  fi
-  printf -- '- [Zotero changelog](https://www.zotero.org/support/changelog)\n' >> "$body"
 
   issue=""
   if [ "$DRY_RUN" = "true" ]; then
-    { printf '### Would file: %s\n\n' "$title"
-      printf 'Labels: `%s`\n\n' "$labels"
-      cat "$body"
+    if [ -n "${tracker[$major]:-}" ]; then
+      action="Would comment on #${tracker[$major]} (${tracker_state[$major]}) and retitle it"
+    else
+      action="Would open a tracker for Zotero ${major} and comment on it"
+    fi
+    { printf '### %s: %s\n\n' "$action" "$title"
+      printf 'Breaking: `%s`, beta: `%s`\n\n' "$breaking" "$beta"
+      cat "$note"
       printf '\n---\n\n'; } >> "$SUMMARY"
+    if [ -z "${tracker[$major]:-}" ]; then tracker[$major]="new"; tracker_state[$major]="not yet filed"; fi
   else
-    issue_url="$(gh issue create --title "$title" --body-file "$body" --label "$labels")"
-    echo "$issue_url"
-    issue="${issue_url##*/}"
+    if [ -z "${tracker[$major]:-}" ]; then
+      header="$(mktemp)"
+      printf '<!-- %s%s -->\n' "$TRACKER_MARK" "$major" >> "$header"
+      printf 'Tracks every Zotero %s build, stable and beta. Each new build is listed below and described in a comment, followed by its smoke-test result. The title names the latest build, and the labels describe that build only.\n\n' \
+        "$major" >> "$header"
+      printf 'Close this once the plugin is checked against the latest build. The next build reopens it.\n\n' >> "$header"
+      printf '## Links\n\n' >> "$header"
+      if dev_url="$(dev_page "$major")"; then
+        printf -- '- [Zotero %s for Developers](%s)\n' "$major" "$dev_url" >> "$header"
+      fi
+      printf -- '- [Zotero changelog](https://www.zotero.org/support/changelog)\n\n' >> "$header"
+      printf '## Builds\n\n' >> "$header"
+      issue_url="$(gh issue create --title "$title" --body-file "$header" --label zotero-release)"
+      echo "$issue_url"
+      tracker[$major]="${issue_url##*/}"; tracker_state[$major]="OPEN"; tracker_labels[$major]="zotero-release"
+      tracker_body[$major]="$(cat "$header")"
+      rm -f "$header"
+    elif [ "${tracker_state[$major]}" != "OPEN" ]; then
+      gh issue reopen "${tracker[$major]}" > /dev/null
+      tracker_state[$major]="OPEN"
+    fi
+    comment_url="$(gh issue comment "${tracker[$major]}" --body-file "$note")"
+    echo "$comment_url"
+
+    # The build list in the body is the dedupe record that does not depend on
+    # how many comments gh issue list returns per issue.
+    entry="- <!-- ${VERSION_MARK}${version} -->[${version}](${comment_url}) (${channel}"
+    [ "$breaking" = "true" ] && entry="$entry, above the ceiling"
+    tracker_body[$major]="${tracker_body[$major]}
+${entry})"
+    body="$(mktemp)"
+    printf '%s\n' "${tracker_body[$major]}" > "$body"
+    gh issue edit "${tracker[$major]}" --title "$title" --body-file "$body" > /dev/null
+    rm -f "$body"
+    set_label "$major" zotero-beta "$beta"
+    set_label "$major" zotero-breaking "$breaking"
+    # The smoke job re-adds this if the new build fails too.
+    set_label "$major" zotero-smoke-failed false
+    issue="${tracker[$major]}"
   fi
-  rm -f "$body"
+  rm -f "$note"
   add_matrix_row "$version" "$channel" "$issue"
-  existing="$existing
-$title"
+  seen="$seen
+$version"
   filed=$((filed + 1))
 done
 
